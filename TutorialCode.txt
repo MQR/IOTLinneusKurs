@@ -1,0 +1,187 @@
+# Explain your code!
+```python=
+#import i2c_read
+global pybytes
+from network import LoRa
+#from network import WLAN
+from struct import *
+import socket
+
+import json
+import time
+import read_dht
+import pycom
+import _thread
+from mqtt import MQTTClient
+import ubinascii
+import hashlib
+import machine
+from machine import Pin
+from machine import ADC
+
+#pycom.pybytes_on_boot(False)
+# Ubidots
+TOKEN = "BBFF-Htx1sTiobwGzbhFRNAfjl2o17hs9zV" # Put here your TOKEN from ubidots
+
+# The code for MQTT transport protocol
+lora = LoRa()
+print("DevEUI: %s" % (ubinascii.hexlify(lora.mac()).decode('ascii')))
+# Getting the LoRa MAC
+lora = LoRa(mode=LoRa.LORAWAN, region=LoRa.EU868)
+print("Device LoRa MAC:", binascii.hexlify(lora.mac()))
+# Create en OTAA authentication parameters (för LoRa) 
+
+THE_APP_EUI = '70B3D57ED0030891' #
+THE_APP_KEY = '6D2F91297FBC9C30EAA0C121F23FC1A0'  # app key
+# End Lora code
+
+# Alarm
+Alarm1 = 'P22' # sensor connected to P22.
+alrm = Pin(Alarm1, mode=Pin.OUT)  # set up pin mode to input
+alrm.value(1)
+time.sleep(4)
+alrm.value(0)
+#Vibration sensor
+VibSensorPin = 'P16' # sensor connected to P16. Valid pins are P13 to P20.
+Pin(VibSensorPin, mode=Pin.IN)  # set up pin mode to input
+adc = ADC(bits=10)             # create an ADC object bits=10 means range 0-705 the lower value the more vibration detected
+apin = adc.channel(attn=ADC.ATTN_11DB, pin=VibSensorPin)   # create an analog pin on P16;  attn=ADC.ATTN_11DB measures voltage from 0.1 to 3.3v
+
+with open('config.json') as f:
+    config = json.load(f)
+##### MQTTClient callback funktion
+def sub_cb(topic, msg):
+    if msg == b'{"Command":"Red"}': pycom.rgbled(0xff0000)
+    if msg == b'{"Command":"Blue"}': pycom.rgbled(0x0004ff)
+    if msg == b'{"Command":"Green"}': pycom.rgbled(0x00ff04)
+    if msg == b'{"Command":"Yellow"}': pycom.rgbled(0xe5ff00)
+    if msg == b'{"Command":"White"}': pycom.rgbled(0xe5ff00)
+    if msg == b'{"Command":"Off"}': pycom.rgbled(0x000000)
+    if msg == b'{"Command":"AlarmOn"}': alrm.value(1)
+    if msg == b'{"Command":"AlarmOff"}': alrm.value(0)   
+    print((topic, msg))
+
+def interval_send(t_):
+    while True:
+        send_value()
+        time.sleep(t_)
+def interval_send_alarm(t_):
+    while True:
+        send_alarm(t_)
+        time.sleep(t_)
+def send_alarm(t_):
+    if apin() < 500:
+        print(' ******************      Alarm on: 14 seconds - value: ', apin()) # one byte
+        alrm.value(1)
+        valtxt = str(apin()) if (apin() < 600) else "0"
+        c.publish(topic_pub,'{"mqr_office": {"vibration":' + str(apin()) +
+                          ',"alarm":' + valtxt +
+                          '}}')
+##### Här försöker jag göra så att om man är med hunden och det rycks och larmet startar, så kan man rycka starkt för att stoppa larmet.
+   time.sleep(6)            
+        #if apin() < 300:
+            #   alrm.value(0)		    
+        time.sleep(3)
+        if apin() < 300:
+            alrm.value(0)
+        time.sleep(3)
+        if apin() < 300:  
+            alrm.value(0)		    
+        time.sleep(3)            
+        alrm.value(0)           
+        print('Alarm off: ', 0) # one byte      
+    time.sleep(t_)
+def blink_led():
+    for n in range(1):
+        pycom.rgbled(0xfcfc03)
+        time.sleep(0.5)
+        pycom.rgbled(0x000000)
+        time.sleep(0.2)
+def send_value():
+    try:
+        # co2, voc, bmp_P, bmp_T = i2c_read.value()
+        dht_Tm, dht_RHm = read_dht.value()
+        val = apin()   # read an analog value
+        time.sleep(1)  # wait 1 sec
+##### Här skapar jag den sträng som ska publiceras via MQTTClient. Det är en json formaterade data
+  c.publish(topic_pub,'{"mqr_office": {"temp":' + str(dht_Tm) +
+                          ',"rh":' + str(dht_RHm) +
+                          ',"vibration":' + str(val) +
+                          ',"alarm":' + str(1 if (val < 600) else 0) +
+                          '}}')
+        print('Sensor data sent ..')   
+        blink_led()
+##### Send data to PyBytes
+        # pybytes.send_signal(1,result.temperature) # optional, sends data to pybyes
+        # pybytes.send_signal(2,result.humidity) # optional, sends data to pybyes
+##### Send data to UBIDOTS
+   res1 = post_var("fipy-pycom2", result.temperature, 1, result.humidity)  # send data to UBIDOTS
+##### Send data med LoRa med sockets
+   payload = struct.pack(">fff", t1, rh1, val)
+   s.send(payload)
+##### Exception behandling
+   except (NameError, ValueError, TypeError):
+        print('Failed to send!')
+        
+# Builds the json to send the request (för Ubidots)
+def build_json(variable1, value1, variable2, value2, variable3, value3):
+    try:
+         lat = 57.806209  # latitude  # Hemma
+         lng = 12.065140  # longtitude
+        # data array creation
+        data = {variable1: {"value": value1},
+                variable2: {"value": value2, "context": {"lat": lat, "lng": lng}}, # value - main information, context - additional
+                variable3: {"value": value3}}
+        return data
+    except:
+        return None
+
+# Sends the request. Please reference the REST API reference https://ubidots.com/docs/api/  (för Ubidots)
+
+def post_var(device, value1, value2, value3):
+    try:
+        url = "https://industrial.api.ubidots.com/"
+        url = url + "api/v1.6/devices/" + device
+        headers = {"X-Auth-Token": TOKEN, "Content-Type": "application/json"}
+        data = build_json("temperature", value1, "position", value2, "humidity", value3)
+        if data is not None:
+            print(data)
+            req = requests.post(url=url, headers=headers, json=data) # include data as JSON object
+            return req.json()
+        else:
+            pass
+    except:
+        pass
+        
+pycom.heartbeat(False) # Disable the heartbeat LED
+##### Create a LoRa socket
+s = socket.socket(socket.AF_LORA, socket.SOCK_RAW)
+s.setsockopt(socket.SOL_LORA, socket.SO_DR, 0)
+s.setblocking(True)
+
+##### Här definierar jag broker och topic inom server vart datat ska skickas (För MQTT)
+topic_pub = 'mqr/office-sensmqr'
+topic_sub = 'mqr/office-sensmqr/control'
+broker_url = 'sjolab.lnu.se'
+##### Här definierar jag clienten och topic inom server vart datat ska skickas. Det är MQTT transport protocol som definieras här
+client_name = ubinascii.hexlify(hashlib.md5(machine.unique_id()).digest()) # create a md5 hash of the pycom WLAN mac
+c = MQTTClient(client_name,broker_url,user=config['user_mqtt'],password=config['pass_mqtt'])
+c.set_callback(sub_cb)
+c.connect()
+c.subscribe(topic_sub)
+##### Här definierar jag functionen som väntar på att ett meddelande (msg) kommer in. Då exekveras callback funktionen sub_cb
+def listen_command(i_):
+    while True:
+        c.check_msg()
+        time.sleep(i_)
+# Tidsinterval för att skicka data till 
+# server när det inte är ett larm är 60s.
+# Larm tillstånd verifieras varje sekond och 
+# data skickas till servern bara med 
+# Vibrations sensors värde och att larmet ska
+#  vara 1. Funktionen som väntar på 
+#  inkommande meddelande körs tio gånger per sekond
+_thread.start_new_thread(interval_send,[60])
+_thread.start_new_thread(listen_command,[0.1])
+_thread.start_new_thread(interval_send_alarm,[1])
+```
